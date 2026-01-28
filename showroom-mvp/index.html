@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MasterSound Virtual Showroom MVP</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; background: #111; }
+        
+        /* UI Overlay - Keypad Simulator */
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 100;
+        }
+
+        .lutron-keypad {
+            background: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 10px;
+            width: 120px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+
+        .lutron-header {
+            font-size: 10px;
+            text-align: center;
+            color: #666;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .keypad-btn {
+            display: block;
+            width: 100%;
+            padding: 12px 0;
+            margin-bottom: 4px;
+            background: #fff;
+            border: 1px solid #ddd;
+            cursor: pointer;
+            font-size: 11px;
+            text-align: center;
+            transition: all 0.2s ease;
+            position: relative;
+        }
+
+        .keypad-btn:hover { background: #f9f9f9; }
+        
+        /* Status LED simulation */
+        .keypad-btn::after {
+            content: '';
+            position: absolute;
+            left: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 4px;
+            height: 4px;
+            background: #ccc;
+            border-radius: 50%;
+            transition: background 0.3s;
+        }
+
+        .keypad-btn.active {
+            background-color: #e6e6e6;
+            font-weight: bold;
+        }
+
+        .keypad-btn.active::after {
+            background: #00ff00; /* Lutron Green LED */
+            box-shadow: 0 0 4px #00ff00;
+        }
+
+        #instructions {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            z-index: 50;
+            cursor: pointer;
+        }
+
+        #instructions h1 { font-size: 36px; margin: 0; }
+        #instructions p { font-size: 18px; }
+    </style>
+    <!-- Import Map for Three.js without build step -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="loading">Carregando Engine...</div>
+    
+    <div id="instructions">
+        <h1>Clique para Entrar</h1>
+        <p>Use W, A, S, D para andar</p>
+        <p>Mouse para olhar</p>
+        <p>ESC para sair</p>
+    </div>
+
+    <!-- Hidden Video Element for Texture -->
+    <video id="video-source" loop crossOrigin="anonymous" playsinline style="display:none">
+        <source src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4" type="video/mp4">
+    </video>
+
+    <div id="ui-layer">
+        <div class="lutron-keypad">
+            <div class="lutron-header">Cinema</div>
+            <button class="keypad-btn" id="btn-welcome" onclick="triggerScene('Welcome')">WELCOME</button>
+            <button class="keypad-btn" id="btn-cinema" onclick="triggerScene('Cinema')">CINEMA</button>
+            <button class="keypad-btn" id="btn-off" onclick="triggerScene('Off')">OFF</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+        // --- Configuration Constants ---
+        const ROOM_SIZE = { w: 10, h: 4, d: 8 };
+        const SPEAKER_POSITIONS = [
+            { x: -3, y: 1.2, z: -3.5, label: "Front Left" },
+            { x: 3, y: 1.2, z: -3.5, label: "Front Right" },
+            { x: 0, y: 1.2, z: -3.5, label: "Center" },
+            { x: -4, y: 1.5, z: 3, label: "Surround Left" },
+            { x: 4, y: 1.5, z: 3, label: "Surround Right" },
+            { x: 0, y: 0.6, z: 3.5, label: "Subwoofer Rear" } // Single Subwoofer at the back
+        ];
+
+        // --- Global State ---
+        let scene, camera, renderer, controls;
+        let audioContext;
+        let masterGain;
+        let convolverNode; // Reverb
+        let lights = {};
+        let materials = {};
+        let soundSources = []; // Array to hold oscillator/panner references
+        let isAudioInitialized = false;
+
+        // Movement State
+        let moveForward = false;
+        let moveBackward = false;
+        let moveLeft = false;
+        let moveRight = false;
+        let prevTime = performance.now();
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+
+        // --- Initialization ---
+        function init() {
+            // 1. Setup Three.js Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x101010);
+            scene.fog = new THREE.FogExp2(0x101010, 0.05);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 1.6, 5); // Human height, back of room
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            // Controls Setup
+            controls = new PointerLockControls(camera, document.body);
+
+            const instructions = document.getElementById('instructions');
+            instructions.addEventListener('click', function () {
+                controls.lock();
+            });
+
+            controls.addEventListener('lock', function () {
+                instructions.style.display = 'none';
+            });
+
+            controls.addEventListener('unlock', function () {
+                instructions.style.display = 'flex';
+            });
+
+            scene.add(controls.getObject());
+
+            // Keyboard Listeners
+            const onKeyDown = function (event) {
+                switch (event.code) {
+                    case 'ArrowUp':
+                    case 'KeyW':
+                        moveForward = true;
+                        break;
+                    case 'ArrowLeft':
+                    case 'KeyA':
+                        moveLeft = true;
+                        break;
+                    case 'ArrowDown':
+                    case 'KeyS':
+                        moveBackward = true;
+                        break;
+                    case 'ArrowRight':
+                    case 'KeyD':
+                        moveRight = true;
+                        break;
+                }
+            };
+
+            const onKeyUp = function (event) {
+                switch (event.code) {
+                    case 'ArrowUp':
+                    case 'KeyW':
+                        moveForward = false;
+                        break;
+                    case 'ArrowLeft':
+                    case 'KeyA':
+                        moveLeft = false;
+                        break;
+                    case 'ArrowDown':
+                    case 'KeyS':
+                        moveBackward = false;
+                        break;
+                    case 'ArrowRight':
+                    case 'KeyD':
+                        moveRight = false;
+                        break;
+                }
+            };
+
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+
+            buildRoom();
+            setupLights();
+            setupProjector();
+            
+            // Initial Scene State
+            triggerSceneVisuals('Welcome');
+
+            window.addEventListener('resize', onWindowResize);
+            document.getElementById('loading').style.display = 'none';
+            animate();
+        }
+
+        // --- 3D Environment Construction ---
+        function buildRoom() {
+            // Floor
+            const floorGeo = new THREE.PlaneGeometry(ROOM_SIZE.w, ROOM_SIZE.d);
+            materials.floor = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.1, metalness: 0.1 });
+            const floor = new THREE.Mesh(floorGeo, materials.floor);
+            floor.rotation.x = -Math.PI / 2;
+            floor.position.y = 0.01; // Raise slightly to prevent Z-fighting with room floor
+            floor.receiveShadow = true;
+            scene.add(floor);
+
+            // Walls (Simplified as a Box reversed mostly)
+            const wallGeo = new THREE.BoxGeometry(ROOM_SIZE.w, ROOM_SIZE.h, ROOM_SIZE.d);
+            materials.walls = new THREE.MeshStandardMaterial({ color: 0x808080, side: THREE.BackSide });
+            const roomBox = new THREE.Mesh(wallGeo, materials.walls);
+            roomBox.position.y = ROOM_SIZE.h / 2;
+            roomBox.receiveShadow = true;
+            scene.add(roomBox);
+
+            // Speakers Visual Representation
+            // Standard Speaker
+            const speakerGeo = new THREE.BoxGeometry(0.3, 0.5, 0.3);
+            const speakerMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+
+            // Subwoofer (Bigger, bulkier)
+            const subGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
+            const subMat = new THREE.MeshStandardMaterial({ color: 0x050505 });
+            
+            SPEAKER_POSITIONS.forEach(pos => {
+                const isSub = pos.label.includes("Subwoofer");
+                const mesh = new THREE.Mesh(isSub ? subGeo : speakerGeo, isSub ? subMat : speakerMat);
+                mesh.position.set(pos.x, pos.y, pos.z);
+                scene.add(mesh);
+                
+                // Debug helper used to visualize sound source
+                const grid = new THREE.GridHelper(isSub ? 0.8 : 0.5, 2);
+                grid.position.copy(mesh.position);
+                grid.rotation.x = Math.PI/2;
+                // Green for subs, white for others
+                grid.material.color.setHex(isSub ? 0x00ff00 : 0x888888); 
+                scene.add(grid);
+            });
+        }
+
+        function setupLights() {
+            // Screen Ambient (Simulating light coming from screen)
+            lights.screen = new THREE.RectAreaLight(0xffffff, 0, 6, 3);
+            lights.screen.position.set(0, 2, -3.9);
+            lights.screen.lookAt(0, 2, 0);
+            scene.add(lights.screen);
+
+            // Ceiling Spots (Dimmable)
+            lights.spots = [];
+            const spotPositions = [
+                {x: -2, z: -2}, {x: 2, z: -2},
+                {x: -2, z: 2}, {x: 2, z: 2}
+            ];
+
+            spotPositions.forEach(pos => {
+                const spot = new THREE.SpotLight(0xffaa77, 0);
+                spot.position.set(pos.x, ROOM_SIZE.h - 0.1, pos.z);
+                spot.angle = Math.PI / 6;
+                spot.penumbra = 0.5;
+                spot.castShadow = true;
+                scene.add(spot);
+                lights.spots.push(spot);
+            });
+
+            // Ambient base
+            lights.ambient = new THREE.AmbientLight(0xffffff, 0.1);
+            scene.add(lights.ambient);
+        }
+
+        function setupProjector() {
+            const video = document.getElementById('video-source');
+            const videoTexture = new THREE.VideoTexture(video);
+            videoTexture.colorSpace = THREE.SRGBColorSpace;
+            
+            const geo = new THREE.PlaneGeometry(6, 3.4);
+            // Use MeshBasicMaterial for the screen so it "glows" (isn't affected by shadows)
+            materials.screen = new THREE.MeshBasicMaterial({ 
+                color: 0x000000, 
+                map: videoTexture 
+            }); 
+            
+            const screen = new THREE.Mesh(geo, materials.screen);
+            screen.position.set(0, 2, -3.95);
+            scene.add(screen);
+        }
+
+        // --- Web Audio API Architecture ---
+        async function initAudioEngine() {
+            if (isAudioInitialized) return;
+
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            audioContext = new AudioContext();
+            
+            // Master Gain (Volume)
+            masterGain = audioContext.createGain();
+            
+            // Create Reverb (Convolver)
+            convolverNode = audioContext.createConvolver();
+            // Generate a simple impulse response for reverb simulation
+            const rate = audioContext.sampleRate;
+            const length = rate * 2; // 2 seconds decay
+            const impulse = audioContext.createBuffer(2, length, rate);
+            for (let channel = 0; channel < 2; channel++) {
+                const channelData = impulse.getChannelData(channel);
+                for (let i = 0; i < length; i++) {
+                    // Decay curve
+                    channelData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 2);
+                }
+            }
+            convolverNode.buffer = impulse;
+
+            // Signal Chain: Sources -> Panner -> Convolver(Parallel) & Dry -> Master -> Dest
+            convolverNode.connect(masterGain);
+            masterGain.connect(audioContext.destination);
+
+            isAudioInitialized = true;
+            console.log("Audio Engine Initialized: HRTF Ready");
+        }
+
+        function startSpatialAudio() {
+            const video = document.getElementById('video-source');
+            video.play();
+
+            // Setup Audio Routing for Video (Pseudo-Upmixing Stereo to 5.1.2)
+            // We only build the graph once to prevent memory leaks/errors
+            if (!video.sourceNode && audioContext) {
+                const mediaSource = audioContext.createMediaElementSource(video);
+                video.sourceNode = mediaSource;
+
+                // Split Stereo Source into Left (0) and Right (1)
+                const splitter = audioContext.createChannelSplitter(2);
+                mediaSource.connect(splitter);
+
+                // --- 1. Front Left (Index 0) ---
+                const pannerFL = createPanner(SPEAKER_POSITIONS[0]);
+                splitter.connect(pannerFL, 0); 
+                pannerFL.connect(masterGain);
+                pannerFL.connect(convolverNode);
+
+                // --- 2. Front Right (Index 1) ---
+                const pannerFR = createPanner(SPEAKER_POSITIONS[1]);
+                splitter.connect(pannerFR, 1);
+                pannerFR.connect(masterGain);
+                pannerFR.connect(convolverNode);
+
+                // --- 3. Center (Index 2) ---
+                const pannerC = createPanner(SPEAKER_POSITIONS[2]);
+                const gainC = audioContext.createGain();
+                gainC.gain.value = 0.6; // Slightly boosted dialogue
+                
+                splitter.connect(gainC, 0); // L
+                splitter.connect(gainC, 1); // R
+                gainC.connect(pannerC);
+                pannerC.connect(masterGain);
+                const reverbGainC = audioContext.createGain();
+                reverbGainC.gain.value = 0.2;
+                pannerC.connect(reverbGainC);
+                reverbGainC.connect(convolverNode);
+
+                // --- 4. Surround Left (Index 3) ---
+                const pannerSL = createPanner(SPEAKER_POSITIONS[3]);
+                const delaySL = audioContext.createDelay();
+                delaySL.delayTime.value = 0.015; 
+                const gainSL = audioContext.createGain();
+                gainSL.gain.value = 0.5; 
+
+                splitter.connect(delaySL, 0);
+                delaySL.connect(gainSL);
+                gainSL.connect(pannerSL);
+                pannerSL.connect(masterGain);
+                pannerSL.connect(convolverNode);
+
+                // --- 5. Surround Right (Index 4) ---
+                const pannerSR = createPanner(SPEAKER_POSITIONS[4]);
+                const delaySR = audioContext.createDelay();
+                delaySR.delayTime.value = 0.015;
+                const gainSR = audioContext.createGain();
+                gainSR.gain.value = 0.5;
+
+                splitter.connect(delaySR, 1);
+                delaySR.connect(gainSR);
+                gainSR.connect(pannerSR);
+                pannerSR.connect(masterGain);
+                pannerSR.connect(convolverNode);
+
+                // --- 6. SUBWOOFER (LFE Channel) (Index 5) ---
+                // Low Pass Filter for Bass extraction (< 120Hz)
+                const lfeFilter = audioContext.createBiquadFilter();
+                lfeFilter.type = 'lowpass';
+                lfeFilter.frequency.value = 120;
+                lfeFilter.Q.value = 0.7;
+
+                // Sub Gain (Bass Boost)
+                const lfeGain = audioContext.createGain();
+                lfeGain.gain.value = 1.5; // Boost bass significantly for effect
+
+                // Connect L+R to LFE Filter
+                splitter.connect(lfeFilter, 0);
+                splitter.connect(lfeFilter, 1);
+                lfeFilter.connect(lfeGain);
+
+                // Sub Rear (Index 5)
+                const pannerSub = createPanner(SPEAKER_POSITIONS[5]);
+                // Bass is omnidirectional, but we position it to give weight to that side
+                pannerSub.rolloffFactor = 0.5; // Bass travels further with less decay
+                lfeGain.connect(pannerSub);
+                pannerSub.connect(masterGain);
+            }
+            
+            // Clean up old oscillators if they exist
+            soundSources.forEach(src => { try { src.osc.stop(); } catch(e){} });
+            soundSources = [];
+        }
+
+        function createPanner(pos) {
+            const panner = audioContext.createPanner();
+            panner.panningModel = 'HRTF';
+            panner.distanceModel = 'inverse';
+            panner.refDistance = 1;
+            panner.maxDistance = 100; // Physics distance
+            panner.rolloffFactor = 1;
+            panner.positionX.value = pos.x;
+            panner.positionY.value = pos.y;
+            panner.positionZ.value = pos.z;
+            return panner;
+        }
+
+        function stopAudio() {
+            const video = document.getElementById('video-source');
+            video.pause();
+            
+            // Stop synthesized ambience
+            soundSources.forEach(src => {
+                try { src.osc.stop(audioContext.currentTime + 0.1); } catch(e){}
+                try { src.lfo.stop(audioContext.currentTime + 0.1); } catch(e){}
+            });
+            soundSources = [];
+        }
+
+        // --- Interaction & Orchestration ---
+
+        // Exposed to global scope for HTML buttons
+        window.triggerScene = async function(sceneName) {
+            // Audio context requires user interaction to start
+            if (!isAudioInitialized) await initAudioEngine();
+            if (audioContext.state === 'suspended') await audioContext.resume();
+
+            // Update UI state
+            document.querySelectorAll('.keypad-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById(`btn-${sceneName.toLowerCase()}`).classList.add('active');
+
+            triggerSceneVisuals(sceneName);
+        };
+
+        function triggerSceneVisuals(sceneName) {
+            const transitionSpeed = 0.02; // Used in animation loop ideally, simpler here
+
+            switch(sceneName) {
+                case 'Welcome':
+                    // Lights On, No Sound, No Screen
+                    lights.screen.intensity = 0;
+                    lights.spots.forEach(l => l.intensity = 20);
+                    materials.screen.color.setHex(0x000000);
+                    stopAudio();
+                    break;
+
+                case 'Cinema':
+                    // Lights Dim, Screen On, Audio On
+                    lights.screen.intensity = 5;
+                    lights.screen.color.setHex(0xAADDFF);
+                    lights.spots.forEach(l => l.intensity = 1); // Dimmed
+                    materials.screen.color.setHex(0xffffff); // Simulating white screen projection
+                    startSpatialAudio(); 
+                    break;
+
+                case 'Off':
+                    lights.screen.intensity = 0;
+                    lights.spots.forEach(l => l.intensity = 0);
+                    materials.screen.color.setHex(0x000000);
+                    stopAudio();
+                    break;
+            }
+        }
+
+        function updateAudioListener() {
+            if (!audioContext || !camera) return;
+
+            // Important: Sync Web Audio Listener with Three.js Camera
+            const listener = audioContext.listener;
+            
+            // Position
+            const p = camera.position;
+            const f = new THREE.Vector3(0, 0, -1);
+            f.applyQuaternion(camera.quaternion);
+            const u = camera.up;
+
+            if (listener.positionX) {
+                // New standard API
+                listener.positionX.value = p.x;
+                listener.positionY.value = p.y;
+                listener.positionZ.value = p.z;
+                
+                listener.forwardX.value = f.x;
+                listener.forwardY.value = f.y;
+                listener.forwardZ.value = f.z;
+                
+                listener.upX.value = u.x;
+                listener.upY.value = u.y;
+                listener.upZ.value = u.z;
+            } else {
+                // Deprecated (Legacy browser support)
+                listener.setPosition(p.x, p.y, p.z);
+                listener.setOrientation(f.x, f.y, f.z, u.x, u.y, u.z);
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (controls.isLocked === true) {
+                const time = performance.now();
+                const delta = (time - prevTime) / 1000;
+
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize(); // Ensure consistent speed in all directions
+
+                if (moveForward || moveBackward) velocity.z -= direction.z * 40.0 * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * 40.0 * delta;
+
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+
+                prevTime = time;
+            } else {
+                // Prevent large delta jumps when pausing
+                prevTime = performance.now();
+            }
+
+            updateAudioListener(); // Update spatial audio based on movement
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>
