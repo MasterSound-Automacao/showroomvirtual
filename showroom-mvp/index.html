@@ -118,11 +118,17 @@
         <source src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4" type="video/mp4">
     </video>
 
+    <!-- Hidden Audio Element for Music Test Mode -->
+    <audio id="music-source" loop crossOrigin="anonymous" style="display:none">
+        <source src="https://raw.githubusercontent.com/mrdoob/three.js/master/examples/sounds/376737_Skullbeatz___Bad_Cat_Maste.mp3" type="audio/mpeg">
+    </audio>
+
     <div id="ui-layer">
         <div class="lutron-keypad">
             <div class="lutron-header">Cinema</div>
-            <button class="keypad-btn" id="btn-welcome" onclick="triggerScene('Welcome')">WELCOME</button>
+            <!-- <button class="keypad-btn" id="btn-welcome" onclick="triggerScene('Welcome')">WELCOME</button> -->
             <button class="keypad-btn" id="btn-cinema" onclick="triggerScene('Cinema')">CINEMA</button>
+            <button class="keypad-btn" id="btn-test" onclick="triggerScene('Test')">TEST</button>
             <button class="keypad-btn" id="btn-off" onclick="triggerScene('Off')">OFF</button>
         </div>
     </div>
@@ -134,9 +140,10 @@
         // --- Configuration Constants ---
         const ROOM_SIZE = { w: 10, h: 4, d: 8 };
         const SPEAKER_POSITIONS = [
-            { x: -3, y: 1.2, z: -3.5, label: "Front Left" },
-            { x: 3, y: 1.2, z: -3.5, label: "Front Right" },
-            { x: 0, y: 1.2, z: -3.5, label: "Center" },
+            // Front L/C/R moved to top and tilted dynamically via lookAt
+            { x: -3, y: 3.2, z: -3.5, label: "Front Left" },
+            { x: 3, y: 3.2, z: -3.5, label: "Front Right" },
+            { x: 0, y: 3.2, z: -3.5, label: "Center" },
             { x: -4, y: 1.5, z: 3, label: "Surround Left" },
             { x: 4, y: 1.5, z: 3, label: "Surround Right" },
             { x: 0, y: 0.6, z: 3.5, label: "Subwoofer Rear" } // Single Subwoofer at the back
@@ -150,7 +157,10 @@
         let lights = {};
         let materials = {};
         let soundSources = []; // Array to hold oscillator/panner references
+        let manualGains = []; // Array for manual distance attenuation
+        let speakerMeshes = []; // Store references to speaker 3D objects
         let isAudioInitialized = false;
+        let testModeTimer = null; // Reference to cancel test loop
 
         // Movement State
         let moveForward = false;
@@ -163,6 +173,29 @@
 
         // --- Initialization ---
         function init() {
+            // 0. Safety Check for File Protocol (CORS Issues)
+            if (window.location.protocol === 'file:') {
+                const instructions = document.getElementById('instructions');
+                instructions.style.display = 'flex';
+                instructions.innerHTML = `
+                    <h1 style="color: #ff5555; text-shadow: 0 0 10px #000;">ERRO CRÍTICO</h1>
+                    <div style="background: rgba(0,0,0,0.8); padding: 20px; border: 1px solid #ff5555; max-width: 600px; text-align: center;">
+                        <p style="font-size: 18px; margin-bottom: 20px;">
+                            Você abriu o arquivo diretamente (file://).<br>
+                            O navegador bloqueia o carregamento de texturas e sons por segurança.
+                        </p>
+                        <p style="font-size: 16px; color: #aaa;">
+                            <b>COMO CORRIGIR:</b><br><br>
+                            1. Abra o terminal na pasta do projeto.<br>
+                            2. Digite: <code style="background:#333; padding:4px; color:white;">python -m http.server</code><br>
+                            3. Acesse no navegador: <a href="http://localhost:8000" style="color: #00ff00;">http://localhost:8000</a>
+                        </p>
+                    </div>
+                `;
+                // Stop initialization to prevent console flood
+                return;
+            }
+
             // 1. Setup Three.js Scene
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x101010);
@@ -178,10 +211,32 @@
 
             // Controls Setup
             controls = new PointerLockControls(camera, document.body);
+            
+            // Handle Pointer Lock Errors (Common in VS Code Simple Browser)
+            document.addEventListener('pointerlockerror', function() {
+                const instructions = document.getElementById('instructions');
+                instructions.style.display = 'flex';
+                instructions.innerHTML = `
+                    <h1>Erro de Navegador</h1>
+                    <p style="color: #ff5555; text-align: center; max-width: 600px;">
+                        O bloqueio de mouse foi impedido. Isso acontece frequentemente dentro do editor.<br>
+                        <b>Abra o link no seu navegador (Chrome/Edge) para testar.</b><br>
+                        (http://localhost:8000)
+                    </p>
+                `;
+            });
 
             const instructions = document.getElementById('instructions');
             instructions.addEventListener('click', function () {
                 controls.lock();
+                // Ensure audio/video starts on user interaction
+                if (audioContext && audioContext.state === 'suspended') {
+                    audioContext.resume();
+                }
+                const video = document.getElementById('video-source');
+                if (video.paused) {
+                    video.play().catch(e => console.log("Video play handled by interaction"));
+                }
             });
 
             controls.addEventListener('lock', function () {
@@ -244,32 +299,135 @@
             setupLights();
             setupProjector();
             
-            // Initial Scene State
-            triggerSceneVisuals('Welcome');
+            // Initial Scene State - Auto-start Cinema Mode
+            triggerSceneVisuals('Cinema');
+            // Try to init audio engine right away (might be blocked until click)
+            initAudioEngine().catch(e => console.log("Audio init waiting for interaction"));
 
             window.addEventListener('resize', onWindowResize);
             document.getElementById('loading').style.display = 'none';
             animate();
         }
 
+        // --- Texture Generation Helper ---
+        function createProceduralTexture(type) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 1024;
+            canvas.height = 1024;
+            const ctx = canvas.getContext('2d');
+            
+            if (type === 'carpet') {
+                // Dark grey base
+                ctx.fillStyle = '#222222';
+                ctx.fillRect(0, 0, 1024, 1024);
+                
+                // Add heavy noise for carpet fibers
+                for (let i = 0; i < 200000; i++) {
+                    const x = Math.random() * 1024;
+                    const y = Math.random() * 1024;
+                    const shade = Math.random();
+                    ctx.fillStyle = shade > 0.5 ? 'rgba(60, 60, 60, 0.4)' : 'rgba(0, 0, 0, 0.4)';
+                    ctx.fillRect(x, y, 2, 2);
+                }
+            } else if (type === 'wall') {
+                // Cinema Wall - Dark Acoustic Fabric
+                // Deep dark grey/black base
+                ctx.fillStyle = '#1a1a1a';
+                ctx.fillRect(0, 0, 1024, 1024);
+                
+                // Fabric texture pattern
+                for (let i = 0; i < 200000; i++) {
+                    const x = Math.random() * 1024;
+                    const y = Math.random() * 1024;
+                    // Crosshatch noise for fabric look
+                    ctx.fillStyle = Math.random() > 0.5 ? 'rgba(50, 50, 50, 0.15)' : 'rgba(0, 0, 0, 0.2)';
+                    if (i % 2 === 0) {
+                         ctx.fillRect(x, y, 1, 3); // Vertical thread
+                    } else {
+                         ctx.fillRect(x, y, 3, 1); // Horizontal thread
+                    }
+                }
+            }
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            return texture;
+        }
+
         // --- 3D Environment Construction ---
         function buildRoom() {
-            // Floor
+            // Floor - Carpet
             const floorGeo = new THREE.PlaneGeometry(ROOM_SIZE.w, ROOM_SIZE.d);
-            materials.floor = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.1, metalness: 0.1 });
+            const carpetTexture = createProceduralTexture('carpet');
+            carpetTexture.repeat.set(4, 4); // Repeat texture
+            
+            materials.floor = new THREE.MeshStandardMaterial({ 
+                map: carpetTexture, 
+                roughness: 0.9, 
+                metalness: 0.1 
+            });
+            
             const floor = new THREE.Mesh(floorGeo, materials.floor);
             floor.rotation.x = -Math.PI / 2;
             floor.position.y = 0.01; // Raise slightly to prevent Z-fighting with room floor
             floor.receiveShadow = true;
             scene.add(floor);
 
-            // Walls (Simplified as a Box reversed mostly)
+            // Walls - Modern Texture
             const wallGeo = new THREE.BoxGeometry(ROOM_SIZE.w, ROOM_SIZE.h, ROOM_SIZE.d);
-            materials.walls = new THREE.MeshStandardMaterial({ color: 0x808080, side: THREE.BackSide });
+            const wallTexture = createProceduralTexture('wall');
+            wallTexture.repeat.set(3, 2); // Repeat texture
+            
+            materials.walls = new THREE.MeshStandardMaterial({ 
+                map: wallTexture, 
+                side: THREE.BackSide,
+                roughness: 0.9, // Higher roughness for fabric
+                metalness: 0.05
+            });
+            
             const roomBox = new THREE.Mesh(wallGeo, materials.walls);
             roomBox.position.y = ROOM_SIZE.h / 2;
             roomBox.receiveShadow = true;
             scene.add(roomBox);
+
+            // --- MasterSound Logo on Left Wall ---
+            const textureLoader = new THREE.TextureLoader();
+            
+            // Adding a timestamp to force browser to reload the image (avoid cache issues)
+            const logoPath = 'assets/images/mastersound-logo.png?v=' + new Date().getTime();
+
+            const logoTexture = textureLoader.load(
+                logoPath,
+                // onLoad callback
+                function (texture) {
+                    console.log('Logo loaded successfully');
+                },
+                // onProgress callback
+                undefined,
+                // onError callback
+                function (err) {
+                    console.error('ERROR LOADING LOGO:', err);
+                    console.error('Attempted path:', logoPath);
+                    // Fallback visual debug - Red square if logo fails
+                    logoMesh.material.map = null;
+                    logoMesh.material.color.setHex(0xff0000); 
+                }
+            ); 
+            
+            const logoGeo = new THREE.PlaneGeometry(6.0, 3.0); // Adjust aspect ratio as needed
+            const logoMat = new THREE.MeshStandardMaterial({ 
+                map: logoTexture,
+                transparent: true, // Allows PNG transparency
+                roughness: 0.8,
+                metalness: 0.2
+            });
+            
+            const logoMesh = new THREE.Mesh(logoGeo, logoMat);
+            // Position on Left Wall (Negative X), slightly offset inwards (0.05) to avoid z-fighting
+            logoMesh.position.set(-(ROOM_SIZE.w / 2) + 0.05, 2.2, 0); 
+            logoMesh.rotation.y = Math.PI / 2; // Rotate to face center
+            scene.add(logoMesh);
 
             // Speakers Visual Representation
             // Standard Speaker
@@ -280,19 +438,37 @@
             const subGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
             const subMat = new THREE.MeshStandardMaterial({ color: 0x050505 });
             
+            // Sweet spot for audio/viewing (Center of room, slightly above ear level)
+            const centerPoint = new THREE.Vector3(0, 1.2, 0);
+
             SPEAKER_POSITIONS.forEach(pos => {
                 const isSub = pos.label.includes("Subwoofer");
-                const mesh = new THREE.Mesh(isSub ? subGeo : speakerGeo, isSub ? subMat : speakerMat);
+                // Clone material to allow individual emissive color changes
+                const mat = isSub ? subMat.clone() : speakerMat.clone();
+                const mesh = new THREE.Mesh(isSub ? subGeo : speakerGeo, mat);
                 mesh.position.set(pos.x, pos.y, pos.z);
-                scene.add(mesh);
                 
-                // Debug helper used to visualize sound source
+                // FACE THE CENTER
+                mesh.lookAt(centerPoint);
+                
+                scene.add(mesh);
+                speakerMeshes.push(mesh); // Store for Test Mode highlighting
+                
+                // Debug helper attached to the mesh so it rotates with it
                 const grid = new THREE.GridHelper(isSub ? 0.8 : 0.5, 2);
-                grid.position.copy(mesh.position);
-                grid.rotation.x = Math.PI/2;
-                // Green for subs, white for others
+                
+                // Rotate grid 90 deg so it faces forward (relative to mesh +Z)
+                grid.rotation.x = Math.PI / 2;
+                
+                // Position grid on the face of the speaker
+                // Box depths are 0.3 (normal) and 0.6 (sub), so half is 0.15 and 0.3
+                grid.position.z = isSub ? 0.31 : 0.16; 
+                
+                // Green for subs, white/grey for others
                 grid.material.color.setHex(isSub ? 0x00ff00 : 0x888888); 
-                scene.add(grid);
+                
+                // Add grid as child of mesh
+                mesh.add(grid);
             });
         }
 
@@ -356,13 +532,14 @@
             convolverNode = audioContext.createConvolver();
             // Generate a simple impulse response for reverb simulation
             const rate = audioContext.sampleRate;
-            const length = rate * 2; // 2 seconds decay
+            // Reduced decay from 2s to 0.4s to simulate acoustically treated cinema room
+            const length = rate * 0.4; 
             const impulse = audioContext.createBuffer(2, length, rate);
             for (let channel = 0; channel < 2; channel++) {
                 const channelData = impulse.getChannelData(channel);
                 for (let i = 0; i < length; i++) {
-                    // Decay curve
-                    channelData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 2);
+                    // Sharper decay curve and lower amplitude (0.1) for tighter sound
+                    channelData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 3) * 0.1;
                 }
             }
             convolverNode.buffer = impulse;
@@ -377,92 +554,102 @@
 
         function startSpatialAudio() {
             const video = document.getElementById('video-source');
+            video.muted = false; // Unmute
             video.play();
+            
+            // Clear previous manual gains
+            manualGains = [];
 
             // Setup Audio Routing for Video (Pseudo-Upmixing Stereo to 5.1.2)
-            // We only build the graph once to prevent memory leaks/errors
+            // Ensure source node exists
             if (!video.sourceNode && audioContext) {
-                const mediaSource = audioContext.createMediaElementSource(video);
-                video.sourceNode = mediaSource;
-
+                video.sourceNode = audioContext.createMediaElementSource(video);
+            }
+            
+            // Rebuild Graph Strategy: Disconnect source and rebuild 5.1 chain
+            // This allows switching back and forth between Test Mode (Single Channel) and Cinema (5.1)
+            if (video.sourceNode) {
+                video.sourceNode.disconnect();
+                
                 // Split Stereo Source into Left (0) and Right (1)
                 const splitter = audioContext.createChannelSplitter(2);
-                mediaSource.connect(splitter);
+                video.sourceNode.connect(splitter);
+                
+                // Helper to create chain: Source -> AttenuationGain -> Panner -> Master/Reverb
+                const createChannel = (inputNode, outputIndex, pos) => {
+                    const attenuationGain = audioContext.createGain();
+                    manualGains.push({ node: attenuationGain, pos: pos });
+                    
+                    const panner = createPanner(pos);
+                    
+                    // Connect Input -> Attenuation -> Panner
+                    if (outputIndex !== null) {
+                        inputNode.connect(attenuationGain, outputIndex);
+                    } else {
+                        inputNode.connect(attenuationGain);
+                    }
+                    attenuationGain.connect(panner);
+                    
+                    // Connect Panner -> Outputs
+                    panner.connect(masterGain);
+                    panner.connect(convolverNode);
+                    
+                    return { gain: attenuationGain, panner: panner };
+                };
 
                 // --- 1. Front Left (Index 0) ---
-                const pannerFL = createPanner(SPEAKER_POSITIONS[0]);
-                splitter.connect(pannerFL, 0); 
-                pannerFL.connect(masterGain);
-                pannerFL.connect(convolverNode);
+                createChannel(splitter, 0, SPEAKER_POSITIONS[0]);
 
                 // --- 2. Front Right (Index 1) ---
-                const pannerFR = createPanner(SPEAKER_POSITIONS[1]);
-                splitter.connect(pannerFR, 1);
-                pannerFR.connect(masterGain);
-                pannerFR.connect(convolverNode);
+                createChannel(splitter, 1, SPEAKER_POSITIONS[1]);
 
                 // --- 3. Center (Index 2) ---
-                const pannerC = createPanner(SPEAKER_POSITIONS[2]);
+                // Special case for Center: Sum L+R
                 const gainC = audioContext.createGain();
-                gainC.gain.value = 0.6; // Slightly boosted dialogue
+                gainC.gain.value = 0.6; 
+                splitter.connect(gainC, 0); 
+                splitter.connect(gainC, 1);
                 
-                splitter.connect(gainC, 0); // L
-                splitter.connect(gainC, 1); // R
-                gainC.connect(pannerC);
-                pannerC.connect(masterGain);
+                // Route Center Sum -> Attenuation -> Panner
+                const centerChain = createChannel(gainC, null, SPEAKER_POSITIONS[2]);
+                // Boost Reverb for Center specifically (dialogue ambiance)
                 const reverbGainC = audioContext.createGain();
                 reverbGainC.gain.value = 0.2;
-                pannerC.connect(reverbGainC);
+                centerChain.panner.disconnect(convolverNode); // Disconnect default
+                centerChain.panner.connect(reverbGainC);
                 reverbGainC.connect(convolverNode);
 
                 // --- 4. Surround Left (Index 3) ---
-                const pannerSL = createPanner(SPEAKER_POSITIONS[3]);
                 const delaySL = audioContext.createDelay();
                 delaySL.delayTime.value = 0.015; 
                 const gainSL = audioContext.createGain();
                 gainSL.gain.value = 0.5; 
-
                 splitter.connect(delaySL, 0);
                 delaySL.connect(gainSL);
-                gainSL.connect(pannerSL);
-                pannerSL.connect(masterGain);
-                pannerSL.connect(convolverNode);
+                createChannel(gainSL, null, SPEAKER_POSITIONS[3]);
 
                 // --- 5. Surround Right (Index 4) ---
-                const pannerSR = createPanner(SPEAKER_POSITIONS[4]);
                 const delaySR = audioContext.createDelay();
                 delaySR.delayTime.value = 0.015;
                 const gainSR = audioContext.createGain();
                 gainSR.gain.value = 0.5;
-
                 splitter.connect(delaySR, 1);
                 delaySR.connect(gainSR);
-                gainSR.connect(pannerSR);
-                pannerSR.connect(masterGain);
-                pannerSR.connect(convolverNode);
+                createChannel(gainSR, null, SPEAKER_POSITIONS[4]);
 
                 // --- 6. SUBWOOFER (LFE Channel) (Index 5) ---
-                // Low Pass Filter for Bass extraction (< 120Hz)
                 const lfeFilter = audioContext.createBiquadFilter();
                 lfeFilter.type = 'lowpass';
-                lfeFilter.frequency.value = 120;
+                lfeFilter.frequency.value = 80; // Changed to 80Hz for deeper, less muddy bass
                 lfeFilter.Q.value = 0.7;
-
-                // Sub Gain (Bass Boost)
                 const lfeGain = audioContext.createGain();
-                lfeGain.gain.value = 1.5; // Boost bass significantly for effect
-
-                // Connect L+R to LFE Filter
+                lfeGain.gain.value = 2.5; // Boosted from 1.5 to 2.5 for more "felt" impact
                 splitter.connect(lfeFilter, 0);
                 splitter.connect(lfeFilter, 1);
                 lfeFilter.connect(lfeGain);
-
-                // Sub Rear (Index 5)
-                const pannerSub = createPanner(SPEAKER_POSITIONS[5]);
-                // Bass is omnidirectional, but we position it to give weight to that side
-                pannerSub.rolloffFactor = 0.5; // Bass travels further with less decay
-                lfeGain.connect(pannerSub);
-                pannerSub.connect(masterGain);
+                
+                // Subwoofer Channel
+                createChannel(lfeGain, null, SPEAKER_POSITIONS[5]);
             }
             
             // Clean up old oscillators if they exist
@@ -473,26 +660,231 @@
         function createPanner(pos) {
             const panner = audioContext.createPanner();
             panner.panningModel = 'HRTF';
-            panner.distanceModel = 'inverse';
-            panner.refDistance = 1;
-            panner.maxDistance = 100; // Physics distance
-            panner.rolloffFactor = 1;
+            panner.distanceModel = 'inverse'; // Native attenuation disabled effectively below
+            panner.rolloffFactor = 0; // Disable native rolloff, handled by manualGains
             panner.positionX.value = pos.x;
             panner.positionY.value = pos.y;
             panner.positionZ.value = pos.z;
             return panner;
         }
 
+        function createPinkNoise() {
+            const bufferSize = 2 * audioContext.sampleRate; // 2 seconds buffer
+            const buffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
+            const output = buffer.getChannelData(0);
+            let b0, b1, b2, b3, b4, b5, b6;
+            b0 = b1 = b2 = b3 = b4 = b5 = b6 = 0.0;
+            for (let i = 0; i < bufferSize; i++) {
+                const white = Math.random() * 2 - 1;
+                b0 = 0.99886 * b0 + white * 0.0555179;
+                b1 = 0.99332 * b1 + white * 0.0750759;
+                b2 = 0.96900 * b2 + white * 0.1538520;
+                b3 = 0.86650 * b3 + white * 0.3104856;
+                b4 = 0.55000 * b4 + white * 0.5329522;
+                b5 = -0.7616 * b5 - white * 0.0168980;
+                output[i] = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362;
+                output[i] *= 0.11; // (roughly) compensate for gain
+                b6 = white * 0.115926;
+            }
+            return buffer;
+        }
+
+        async function runTestMode() {
+            stopAudio(); // Clear everything
+            manualGains = [];
+            
+            const pinkNoiseBuffer = createPinkNoise();
+            let currentIndex = 0;
+            let testPhase = 0; // 0 = Pink Noise, 1 = Music
+            
+            // Get media elements
+            const video = document.getElementById('video-source');
+            const music = document.getElementById('music-source');
+
+            // Establish Music Source Node ONCE
+            if (!music.sourceNode && audioContext) {
+                music.sourceNode = audioContext.createMediaElementSource(music);
+            }
+
+            const playNext = () => {
+                // Stop previous feedback if any
+                speakerMeshes.forEach(m => {
+                    m.material.emissive.setHex(0x000000); 
+                });
+                
+                // Clear audio (Oscillators/Buffers)
+                soundSources.forEach(src => {
+                    try { src.stop(); } catch(e){} 
+                    try { src.disconnect(); } catch(e){}
+                });
+                soundSources = [];
+                manualGains = []; 
+
+                // Music Logic:
+                // 1. Always disconnect existing connection to speaker
+                if (music.sourceNode) {
+                    try { music.sourceNode.disconnect(); } catch(e){}
+                }
+                
+                // Video Logic: Reset if potentially coming from Phase 2
+                if (!video.paused || testPhase === 2) {
+                     video.pause();
+                     video.currentTime = 0;
+                     // video.muted = true; // Don't mute here as we might need it for startSpatialAudio? Actually startSpatialAudio handles it.
+                     if (video.sourceNode) {
+                        try { video.sourceNode.disconnect(); } catch(e){}
+                     }
+                }
+
+                // 2. Determine if we are staying in current phase or switching
+                let nextPhase = testPhase;
+                let transition = false;
+                
+                // If in Phase 2, transition immediately (single step phase)
+                if (testPhase === 2) {
+                     transition = true;
+                     // Restore visual state for Test Mode
+                     lights.spots.forEach(l => l.intensity = 10);
+                     materials.screen.color.setHex(0x050505);
+                }
+                else if (currentIndex >= SPEAKER_POSITIONS.length) {
+                    transition = true;
+                    currentIndex = 0;
+                }
+                
+                if (transition) {
+                     // 0 -> 1 -> 2 -> 0 ...
+                     if (testPhase === 2) nextPhase = 0;
+                     else nextPhase = testPhase + 1;
+                     
+                     console.log(`Test Phase Switched from ${testPhase} to ${nextPhase}`);
+                     testPhase = nextPhase;
+                }
+
+                // 3. If next up is Pink Noise (Phase 0), stop the music. 
+                //    If next up is Music (Phase 1), let it continue (don't pause/reset)
+                //    If next up is Cinema (Phase 2), stop music
+                if (testPhase === 0 || testPhase === 2) {
+                     music.pause();
+                     music.currentTime = 0;
+                }
+
+                // --- EXECUTION ---
+                if (testPhase === 2) {
+                     // === PHASE 2: CINEMA FULL SYSTEM ===
+                     console.log("Starting Phase 2: Cinema Mode 5.1 Test");
+                     
+                     // Visuals: Dim lights for Cinema
+                     lights.spots.forEach(l => l.intensity = 1); 
+                     materials.screen.color.setHex(0xffffff); // Screen On
+                     
+                     // Highlight ALL speakers Green
+                     speakerMeshes.forEach(m => m.material.emissive.setHex(0x00ff00));
+                     
+                     // Audio: Start Full 5.1 System
+                     startSpatialAudio(); 
+                     
+                     // Duration: Play full movie then switch
+                     // Remove any existing timer
+                     if (testModeTimer) clearTimeout(testModeTimer);
+                     
+                     // Use onended event to trigger next phase
+                     video.onended = () => {
+                         video.onended = null; // Prevent multiple triggers
+                         playNext();
+                     };
+                     return;
+                }
+
+                // === PHASE 0 & 1: SINGLE SPEAKER ===
+                const pos = SPEAKER_POSITIONS[currentIndex];
+                const mesh = speakerMeshes[currentIndex];
+                
+                console.log(`Testing Speaker (${testPhase === 0 ? 'Noise' : 'Music'}): ${pos.label}`);
+
+                // Visual Feedback
+                mesh.material.emissive.setHex(0x00ff00); // Green glow
+
+                // Setup Chain: Source -> [Optional Filter] -> ManualGain -> Panner -> Master
+                const manualGain = audioContext.createGain();
+                manualGains.push({ node: manualGain, pos: pos }); // Enable distance attenuation per speaker
+                
+                let chainInput = null;
+                
+                // If Subwoofer, add Low Pass Filter to simulate real behavior in test mode
+                if (pos.label.includes("Subwoofer")) {
+                    const subFilter = audioContext.createBiquadFilter();
+                    subFilter.type = 'lowpass';
+                    subFilter.frequency.value = 80;
+                    subFilter.Q.value = 1.0;
+                    
+                    // Boost filter output to compensate for lost energy
+                    const subBoost = audioContext.createGain();
+                    subBoost.gain.value = 2.0;
+                    
+                    subFilter.connect(subBoost);
+                    subBoost.connect(manualGain);
+                    chainInput = subFilter; // Source connects here
+                } else {
+                    chainInput = manualGain; // Source connects directly here
+                }
+
+                const panner = createPanner(pos);
+                manualGain.connect(panner);
+                panner.connect(masterGain);
+
+                if (testPhase === 0) {
+                    // --- PINK NOISE PHASE ---
+                    const source = audioContext.createBufferSource();
+                    source.buffer = pinkNoiseBuffer;
+                    source.loop = true;
+                    source.connect(chainInput);
+                    source.start();
+                    soundSources.push(source);
+                } else {
+                    // --- MUSIC PHASE (Dedicated Music Track) ---
+                    // Connecting the ALREADY EXISTING source node
+                    music.sourceNode.connect(chainInput);
+                    
+                    music.muted = false;
+                    music.play().catch(e => console.error("Music Play Failed:", e));
+                }
+
+                currentIndex++;
+                
+                // Schedule next call
+                testModeTimer = setTimeout(playNext, 5000); // 5 seconds per speaker
+            };
+
+            playNext();
+        }
+
         function stopAudio() {
+            if (testModeTimer) clearTimeout(testModeTimer);
+            speakerMeshes.forEach(m => m.material.emissive.setHex(0x000000));
+            
             const video = document.getElementById('video-source');
             video.pause();
+            video.currentTime = 0; // Reset to start
+            video.muted = true; // Mute to ensure no audio bleed
+
+            const music = document.getElementById('music-source');
+            music.pause();
+            music.currentTime = 0;
+            // Disconnect simply to be clean, but keep sourceNode alive
+            if (music.sourceNode) {
+                 try { music.sourceNode.disconnect(); } catch(e){}
+            }
             
-            // Stop synthesized ambience
+            // Stop synthesized ambience created in startSpatialAudio (if any remaining)
             soundSources.forEach(src => {
-                try { src.osc.stop(audioContext.currentTime + 0.1); } catch(e){}
+                try { src.osc.stop(audioContext.currentTime + 0.1); } catch(e){} 
                 try { src.lfo.stop(audioContext.currentTime + 0.1); } catch(e){}
+                // Determine if it is a buffer source (from test mode)
+                try { src.stop(); } catch(e){}
             });
             soundSources = [];
+            manualGains = [];
         }
 
         // --- Interaction & Orchestration ---
@@ -528,8 +920,17 @@
                     lights.screen.color.setHex(0xAADDFF);
                     lights.spots.forEach(l => l.intensity = 1); // Dimmed
                     materials.screen.color.setHex(0xffffff); // Simulating white screen projection
+                    stopAudio(); // Ensure clean slate
                     startSpatialAudio(); 
                     break;
+
+                case 'Test':
+                     // Spotlight setup for maintenance
+                     lights.screen.intensity = 1;
+                     lights.spots.forEach(l => l.intensity = 10);
+                     materials.screen.color.setHex(0x050505); // Almost black, hide video content visually
+                     runTestMode();
+                     break;
 
                 case 'Off':
                     lights.screen.intensity = 0;
@@ -569,6 +970,29 @@
                 // Deprecated (Legacy browser support)
                 listener.setPosition(p.x, p.y, p.z);
                 listener.setOrientation(f.x, f.y, f.z, u.x, u.y, u.z);
+            }
+
+            // Manual Distance Attenuation Logic
+            if (manualGains.length > 0) {
+                 manualGains.forEach(item => {
+                     const speakerPos = new THREE.Vector3(item.pos.x, item.pos.y, item.pos.z);
+                     const dist = p.distanceTo(speakerPos);
+                     
+                     // Custom Curve:
+                     // < 2m = 100% volume
+                     // > 10m = 0% volume
+                     // Linear interpolation in betweeen
+                     let vol = 1;
+                     if (dist > 2) {
+                        vol = 1 - ((dist - 2) / 8); 
+                     }
+                     
+                     // Clamp
+                     vol = Math.max(0, Math.min(1, vol)); 
+                     
+                     // Apply volume ramp smoothly
+                     item.node.gain.setTargetAtTime(vol, audioContext.currentTime, 0.1);
+                 });
             }
         }
 
