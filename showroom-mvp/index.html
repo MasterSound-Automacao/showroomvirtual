@@ -109,6 +109,7 @@
     <div id="instructions">
         <h1>Clique para Entrar</h1>
         <p>Use W, A, S, D para andar</p>
+        <p>Use <b>E</b> para Sentar/Levantar</p>
         <p>Mouse para olhar</p>
         <p>ESC para sair</p>
     </div>
@@ -125,9 +126,8 @@
 
     <div id="ui-layer">
         <div class="lutron-keypad">
-            <div class="lutron-header">Cinema</div>
-            <!-- <button class="keypad-btn" id="btn-welcome" onclick="triggerScene('Welcome')">WELCOME</button> -->
-            <button class="keypad-btn" id="btn-cinema" onclick="triggerScene('Cinema')">CINEMA</button>
+            <div class="lutron-header">Control</div>
+            <!-- Cinema Mode Removed as requested -->
             <button class="keypad-btn" id="btn-test" onclick="triggerScene('Test')">TEST</button>
             <button class="keypad-btn" id="btn-off" onclick="triggerScene('Off')">OFF</button>
         </div>
@@ -136,6 +136,7 @@
     <script type="module">
         import * as THREE from 'three';
         import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+        import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 
         // --- Configuration Constants ---
         const ROOM_SIZE = { w: 10, h: 4, d: 8 };
@@ -161,12 +162,16 @@
         let speakerMeshes = []; // Store references to speaker 3D objects
         let isAudioInitialized = false;
         let testModeTimer = null; // Reference to cancel test loop
+        
+        // Light Probe for Dynamic Screen Lighting
+        let lightProbeCanvas, lightProbeCtx;
 
         // Movement State
         let moveForward = false;
         let moveBackward = false;
         let moveLeft = false;
         let moveRight = false;
+        let isSitting = false;
         let prevTime = performance.now();
         const velocity = new THREE.Vector3();
         const direction = new THREE.Vector3();
@@ -196,10 +201,20 @@
                 return;
             }
 
+            // Init Dynamic Lighting Probe
+            lightProbeCanvas = document.createElement('canvas');
+            lightProbeCanvas.width = 4;
+            lightProbeCanvas.height = 4;
+            lightProbeCtx = lightProbeCanvas.getContext('2d', { willReadFrequently: true });
+            lightProbeCtx.imageSmoothingEnabled = false; // Fast sampling
+
             // 1. Setup Three.js Scene
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x101010);
             scene.fog = new THREE.FogExp2(0x101010, 0.05);
+
+            // Initialize RectAreaLight (Essential for Screen Glow)
+            RectAreaLightUniformsLib.init();
 
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
             camera.position.set(0, 1.6, 5); // Human height, back of room
@@ -268,6 +283,22 @@
                     case 'KeyD':
                         moveRight = true;
                         break;
+                    case 'KeyE':
+                        if (isSitting) {
+                            // Stand up
+                            isSitting = false;
+                            camera.position.y = 1.6; 
+                            camera.position.z -= 0.8; // Step forward
+                        } else {
+                            // Check distance to sofa (approx 0, 0, 0.8)
+                            if (camera.position.distanceTo(new THREE.Vector3(0, 0, 0.8)) < 3.5) {
+                                isSitting = true;
+                                moveForward = moveBackward = moveLeft = moveRight = false; // Stop moving
+                                // Sit position (Head at typical height ~1.1m)
+                                camera.position.set(0, 1.1, 0.8); 
+                            }
+                        }
+                        break;
                 }
             };
 
@@ -299,8 +330,8 @@
             setupLights();
             setupProjector();
             
-            // Initial Scene State - Auto-start Cinema Mode
-            triggerSceneVisuals('Cinema');
+            // Initial Scene State - Auto-start Off Mode
+            triggerSceneVisuals('Off');
             // Try to init audio engine right away (might be blocked until click)
             initAudioEngine().catch(e => console.log("Audio init waiting for interaction"));
 
@@ -364,8 +395,9 @@
             
             materials.floor = new THREE.MeshStandardMaterial({ 
                 map: carpetTexture, 
-                roughness: 0.9, 
-                metalness: 0.1 
+                color: 0x050505, // Preto
+                roughness: 1.0,  // Fosco total
+                metalness: 0.0 
             });
             
             const floor = new THREE.Mesh(floorGeo, materials.floor);
@@ -382,8 +414,9 @@
             materials.walls = new THREE.MeshStandardMaterial({ 
                 map: wallTexture, 
                 side: THREE.BackSide,
-                roughness: 0.9, // Higher roughness for fabric
-                metalness: 0.05
+                color: 0x050505, // Preto
+                roughness: 1.0,  // Fosco total
+                metalness: 0.0
             });
             
             const roomBox = new THREE.Mesh(wallGeo, materials.walls);
@@ -428,6 +461,151 @@
             logoMesh.position.set(-(ROOM_SIZE.w / 2) + 0.05, 2.2, 0); 
             logoMesh.rotation.y = Math.PI / 2; // Rotate to face center
             scene.add(logoMesh);
+
+            // --- Modern Leather Sofa (Centers the User) ---
+            const sofaGroup = new THREE.Group();
+            
+            // Leather Material (Black, shiny, slight bumps)
+            const leatherMat = new THREE.MeshStandardMaterial({ 
+                color: 0x050505, // Very dark grey/black
+                roughness: 0.4,  // Smoother than fabric
+                metalness: 0.1,  // Slight sheen
+                // bumpMap: createLeatherNoise() // Advanced, but simple color is enough for MVP
+            });
+
+            // Sofa Base
+            const baseGeo = new THREE.BoxGeometry(2.4, 0.3, 1.0);
+            const base = new THREE.Mesh(baseGeo, leatherMat);
+            base.position.y = 0.15;
+            base.castShadow = true; base.receiveShadow = true;
+            sofaGroup.add(base);
+
+            // Seat Cushions (3 sections)
+            const cushionGeo = new THREE.BoxGeometry(0.75, 0.15, 0.95);
+            for(let i=-1; i<=1; i++) {
+                const cushion = new THREE.Mesh(cushionGeo, leatherMat);
+                cushion.position.set(i * 0.8, 0.375, 0.02);
+                cushion.castShadow = true;
+                sofaGroup.add(cushion);
+            }
+
+            // Backrest (Low, modern profile)
+            const backGeo = new THREE.BoxGeometry(2.4, 0.5, 0.25);
+            const back = new THREE.Mesh(backGeo, leatherMat);
+            back.position.set(0, 0.55, 0.38);
+            back.castShadow = true;
+            sofaGroup.add(back);
+
+            // Side Arms (Wide, blocky)
+            const armGeo = new THREE.BoxGeometry(0.3, 0.6, 1.0);
+            const armL = new THREE.Mesh(armGeo, leatherMat);
+            armL.position.set(-1.35, 0.3, 0);
+            armL.castShadow = true;
+            sofaGroup.add(armL);
+            
+            const armR = new THREE.Mesh(armGeo, leatherMat);
+            armR.position.set(1.35, 0.3, 0);
+            armR.castShadow = true;
+            sofaGroup.add(armR);
+
+            // Mushroom logic removed
+            /* 
+            // 1. Red Mushroom - Removed
+            const shroomGroup = new THREE.Group();
+            ...
+            */
+
+            // Position Sofa
+            sofaGroup.position.set(0, 0, 0.8);
+            scene.add(sofaGroup);
+            
+            // --- Shelf with Figures (Back Right Corner) ---
+            const shelfGroup = new THREE.Group();
+            const shelfMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a }); // Dark wood/metal
+            
+            // Unit structure
+            const shelfSideGeo = new THREE.BoxGeometry(0.05, 2.0, 0.4);
+            const shelfSideL = new THREE.Mesh(shelfSideGeo, shelfMat);
+            shelfSideL.position.x = -0.6;
+            const shelfSideR = new THREE.Mesh(shelfSideGeo, shelfMat);
+            shelfSideR.position.x = 0.6;
+            shelfGroup.add(shelfSideL);
+            shelfGroup.add(shelfSideR);
+            
+            // Shelves & Items
+            const plankGeo = new THREE.BoxGeometry(1.25, 0.05, 0.4);
+            for(let i=0; i<4; i++) {
+                const y = -0.8 + (i * 0.55);
+                const plank = new THREE.Mesh(plankGeo, shelfMat);
+                plank.position.y = y;
+                shelfGroup.add(plank);
+                
+                // Add decorations on shelves
+                if (i === 2) { // Action Figures Shelf
+                    const figGeo = new THREE.CapsuleGeometry(0.06, 0.15, 4, 8);
+                    const colors = [0x00ff00, 0x0000ff, 0xff0000]; // Hero colors
+                    for(let j=0; j<3; j++) {
+                        const fig = new THREE.Mesh(figGeo, new THREE.MeshStandardMaterial({ color: colors[j] }));
+                        fig.position.set(-0.3 + (j*0.3), y + 0.18, 0);
+                        shelfGroup.add(fig);
+                    }
+                }
+                if (i === 1) { // Books/Comics Shelf
+                    const bookGeo = new THREE.BoxGeometry(0.05, 0.25, 0.2);
+                    for(let k=0; k<8; k++) {
+                        const book = new THREE.Mesh(bookGeo, new THREE.MeshStandardMaterial({ 
+                            color: Math.random() * 0xffffff 
+                        }));
+                        book.position.set(-0.4 + (k*0.06), y + 0.15, 0);
+                        // Random tilt
+                        book.rotation.z = (Math.random() - 0.5) * 0.2;
+                        shelfGroup.add(book);
+                    }
+                }
+            }
+            
+            shelfGroup.position.set(4.7, 1.1, 2.5); // Right wall, parallel
+            shelfGroup.rotation.y = -Math.PI / 2; // Reta, paralela a parede
+            scene.add(shelfGroup);
+
+            // --- Framed Posters on Right Wall ---
+            // Expects images: assets/images/poster1.png, poster2.png, poster3.png
+            const posterFiles = ['poster1.png', 'poster2.png', 'poster3.png'];
+            const posterZPositions = [-2.5, -1.0, 0.5]; // Spaced along the wall
+
+            posterFiles.forEach((filename, i) => {
+                const zPos = posterZPositions[i];
+                
+                // 1. Black Frame
+                const frameGeo = new THREE.BoxGeometry(0.1, 1.4, 1.0); // Thickness, Height, Width
+                const frameMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.6 });
+                const frame = new THREE.Mesh(frameGeo, frameMat);
+                frame.position.set(4.95, 2.2, zPos); // Right wall (X=5)
+                scene.add(frame);
+                
+                // 2. Image Content
+                const posterPath = `assets/images/${filename}?v=` + new Date().getTime();
+                const tex = textureLoader.load(posterPath, undefined, undefined, (err) => {
+                    // If missing, show a placeholder color
+                    console.warn("Poster missing, showing placeholder for:", filename);
+                });
+                
+                const imgGeo = new THREE.PlaneGeometry(0.9, 1.3);
+                // Default placeholder color (different per poster)
+                const fallbackColor = i === 0 ? 0xaa4444 : (i === 1 ? 0x44aa44 : 0x4444aa);
+                
+                const imgMat = new THREE.MeshStandardMaterial({ 
+                    map: tex,
+                    color: 0xffffff, // White to show texture colors correctly
+                    roughness: 0.2
+                });
+                
+                const img = new THREE.Mesh(imgGeo, imgMat);
+                // Position slightly "out" from the frame face so it doesn't flicker
+                img.position.set(4.89, 2.2, zPos); 
+                img.rotation.y = -Math.PI / 2; // Face left (towards room center)
+                scene.add(img);
+            });
 
             // Speakers Visual Representation
             // Standard Speaker
@@ -745,6 +923,8 @@
                      transition = true;
                      // Restore visual state for Test Mode
                      lights.spots.forEach(l => l.intensity = 10);
+                     if(lights.ambient) lights.ambient.intensity = 0.1;
+                     lights.screen.intensity = 1;
                      materials.screen.color.setHex(0x050505);
                 }
                 else if (currentIndex >= SPEAKER_POSITIONS.length) {
@@ -775,7 +955,9 @@
                      console.log("Starting Phase 2: Cinema Mode 5.1 Test");
                      
                      // Visuals: Dim lights for Cinema
-                     lights.spots.forEach(l => l.intensity = 1); 
+                     lights.spots.forEach(l => l.intensity = 0.0); 
+                     if(lights.ambient) lights.ambient.intensity = 0.0;
+                     lights.screen.intensity = 1.0; // Start low, dynamic update matches video
                      materials.screen.color.setHex(0xffffff); // Screen On
                      
                      // Highlight ALL speakers Green
@@ -910,15 +1092,17 @@
                     // Lights On, No Sound, No Screen
                     lights.screen.intensity = 0;
                     lights.spots.forEach(l => l.intensity = 20);
+                    if(lights.ambient) lights.ambient.intensity = 0.1;
                     materials.screen.color.setHex(0x000000);
                     stopAudio();
                     break;
-
-                case 'Cinema':
-                    // Lights Dim, Screen On, Audio On
-                    lights.screen.intensity = 5;
+15.0; // Stronger glow to light up the black room
                     lights.screen.color.setHex(0xAADDFF);
-                    lights.spots.forEach(l => l.intensity = 1); // Dimmed
+                    lights.spots.forEach(l => l.intensity = 0.0); // Spots OFF
+                    if(lights.ambient) lights.ambient.intensity = 0.0; // Ambient OFF
+                    lights.screen.color.setHex(0xAADDFF);
+                    lights.spots.forEach(l => l.intensity = 0.05); // Almost off
+                    if(lights.ambient) lights.ambient.intensity = 0.02; // Very dark
                     materials.screen.color.setHex(0xffffff); // Simulating white screen projection
                     stopAudio(); // Ensure clean slate
                     startSpatialAudio(); 
@@ -928,6 +1112,7 @@
                      // Spotlight setup for maintenance
                      lights.screen.intensity = 1;
                      lights.spots.forEach(l => l.intensity = 10);
+                     if(lights.ambient) lights.ambient.intensity = 0.1;
                      materials.screen.color.setHex(0x050505); // Almost black, hide video content visually
                      runTestMode();
                      break;
@@ -935,6 +1120,7 @@
                 case 'Off':
                     lights.screen.intensity = 0;
                     lights.spots.forEach(l => l.intensity = 0);
+                    if(lights.ambient) lights.ambient.intensity = 0.01; // Deep dark
                     materials.screen.color.setHex(0x000000);
                     stopAudio();
                     break;
@@ -1002,8 +1188,50 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
         }
 
+        function updateScreenLight() {
+            if (!lights.screen || !lightProbeCtx) return;
+            const video = document.getElementById('video-source');
+            
+            // Only update if video is effectively playing
+            if (video.paused || video.ended || video.readyState < 2) return;
+
+            // Sample video frame (low res for speed)
+            lightProbeCtx.drawImage(video, 0, 0, 4, 4);
+            const frame = lightProbeCtx.getImageData(0, 0, 4, 4).data;
+            
+            let r=0, g=0, b=0;
+            const pixelCount = frame.length / 4;
+            
+            for(let i=0; i<frame.length; i+=4) {
+                r += frame[i];
+                g += frame[i+1];
+                b += frame[i+2];
+            }
+            
+            // Average color
+            r = r / pixelCount / 255;
+            g = g / pixelCount / 255;
+            b = b / pixelCount / 255;
+            
+            // Apply color to light (smooth interpolation)
+            const targetColor = new THREE.Color(r, g, b);
+            lights.screen.color.lerp(targetColor, 0.3); // Fast reaction
+            
+            // Calculate Luminance (rec709)
+            const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            
+            // Map luminance to intensity (Dynamic Range)
+            // Max intensity reduced to 6.0 as 15.0 was too bright
+            const targetIntensity = lum * 6.0; 
+            
+            // Smooth intensity transition (lerp)
+            lights.screen.intensity += (targetIntensity - lights.screen.intensity) * 0.2;
+        }
+
         function animate() {
-            requestAnimationFrame(animate);
+            requestAnimationFrame(animate); 
+            
+            updateScreenLight(); // Dynamic Ambilight Effect
 
             if (controls.isLocked === true) {
                 const time = performance.now();
@@ -1016,8 +1244,10 @@
                 direction.x = Number(moveRight) - Number(moveLeft);
                 direction.normalize(); // Ensure consistent speed in all directions
 
-                if (moveForward || moveBackward) velocity.z -= direction.z * 40.0 * delta;
-                if (moveLeft || moveRight) velocity.x -= direction.x * 40.0 * delta;
+                if (!isSitting) {
+                    if (moveForward || moveBackward) velocity.z -= direction.z * 40.0 * delta;
+                    if (moveLeft || moveRight) velocity.x -= direction.x * 40.0 * delta;
+                }
 
                 controls.moveRight(-velocity.x * delta);
                 controls.moveForward(-velocity.z * delta);
