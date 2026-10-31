@@ -674,6 +674,39 @@
                 lights.spots.push(spot);
             });
 
+            // Ambient Perimeter Strips (Lighter Blue, subtle, full room contour)
+            lights.wallStrips = [];
+            const stripColor = 0xAADDFF; // Lighter/weaker blue
+            const stripThickness = 0.2;
+            
+            // Left Strip (Along Z) - Uses Height for length
+            const stripL = new THREE.RectAreaLight(stripColor, 0, stripThickness, ROOM_SIZE.d);
+            stripL.position.set(-(ROOM_SIZE.w / 2) + 0.2, ROOM_SIZE.h - 0.05, 0);
+            stripL.rotation.x = -Math.PI / 2; 
+            scene.add(stripL);
+            lights.wallStrips.push(stripL);
+
+            // Right Strip (Along Z)
+            const stripR = new THREE.RectAreaLight(stripColor, 0, stripThickness, ROOM_SIZE.d);
+            stripR.position.set((ROOM_SIZE.w / 2) - 0.2, ROOM_SIZE.h - 0.05, 0);
+            stripR.rotation.x = -Math.PI / 2; 
+            scene.add(stripR);
+            lights.wallStrips.push(stripR);
+
+            // Front Strip (Along X) - Uses Width for length
+            const stripF = new THREE.RectAreaLight(stripColor, 0, ROOM_SIZE.w, stripThickness);
+            stripF.position.set(0, ROOM_SIZE.h - 0.05, -(ROOM_SIZE.d / 2) + 0.2);
+            stripF.rotation.x = -Math.PI / 2;
+            scene.add(stripF);
+            lights.wallStrips.push(stripF);
+
+            // Back Strip (Along X)
+            const stripB = new THREE.RectAreaLight(stripColor, 0, ROOM_SIZE.w, stripThickness);
+            stripB.position.set(0, ROOM_SIZE.h - 0.05, (ROOM_SIZE.d / 2) - 0.2);
+            stripB.rotation.x = -Math.PI / 2;
+            scene.add(stripB);
+            lights.wallStrips.push(stripB);
+
             // Ambient base
             lights.ambient = new THREE.AmbientLight(0xffffff, 0.1);
             scene.add(lights.ambient);
@@ -1092,18 +1125,19 @@
                     // Lights On, No Sound, No Screen
                     lights.screen.intensity = 0;
                     lights.spots.forEach(l => l.intensity = 20);
+                    if(lights.wallStrips) lights.wallStrips.forEach(l => l.intensity = 1.0); // Blue Ambience Soft
                     if(lights.ambient) lights.ambient.intensity = 0.1;
                     materials.screen.color.setHex(0x000000);
                     stopAudio();
                     break;
-15.0; // Stronger glow to light up the black room
-                    lights.screen.color.setHex(0xAADDFF);
+                
+                case 'Cinema':
+                    // Lights Off (Dark Room), Screen takes over
+                    lights.screen.intensity = 1.0; 
                     lights.spots.forEach(l => l.intensity = 0.0); // Spots OFF
+                    if(lights.wallStrips) lights.wallStrips.forEach(l => l.intensity = 0.1); // Ultra Dim Blue
                     if(lights.ambient) lights.ambient.intensity = 0.0; // Ambient OFF
-                    lights.screen.color.setHex(0xAADDFF);
-                    lights.spots.forEach(l => l.intensity = 0.05); // Almost off
-                    if(lights.ambient) lights.ambient.intensity = 0.02; // Very dark
-                    materials.screen.color.setHex(0xffffff); // Simulating white screen projection
+                    materials.screen.color.setHex(0xffffff); // Screen On
                     stopAudio(); // Ensure clean slate
                     startSpatialAudio(); 
                     break;
@@ -1112,6 +1146,7 @@
                      // Spotlight setup for maintenance
                      lights.screen.intensity = 1;
                      lights.spots.forEach(l => l.intensity = 10);
+                     if(lights.wallStrips) lights.wallStrips.forEach(l => l.intensity = 1.0); // Blue Ambience Soft
                      if(lights.ambient) lights.ambient.intensity = 0.1;
                      materials.screen.color.setHex(0x050505); // Almost black, hide video content visually
                      runTestMode();
@@ -1120,6 +1155,7 @@
                 case 'Off':
                     lights.screen.intensity = 0;
                     lights.spots.forEach(l => l.intensity = 0);
+                    if(lights.wallStrips) lights.wallStrips.forEach(l => l.intensity = 0); // All Off
                     if(lights.ambient) lights.ambient.intensity = 0.01; // Deep dark
                     materials.screen.color.setHex(0x000000);
                     stopAudio();
